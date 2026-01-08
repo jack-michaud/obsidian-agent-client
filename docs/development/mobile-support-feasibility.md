@@ -143,10 +143,15 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
     this.connection = new acp.ClientSideConnection(() => this, stream);
 
     // Initialize with appropriate capabilities
+    // Remote mode: client handles filesystem (agent can't access mobile vault)
+    // Local mode: agent handles filesystem directly, no terminal capability needed
     const initResult = await this.connection.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: {
-        fs: { readTextFile: false, writeTextFile: false },
+        fs: {
+          readTextFile: this.isRemoteMode,   // Client handles file reads in remote mode
+          writeTextFile: this.isRemoteMode,  // Client handles file writes in remote mode
+        },
         terminal: !this.isRemoteMode,  // No terminal in remote mode
       },
     });
@@ -154,35 +159,44 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
     // Rest of initialization...
   }
 
-  private async initializeRemoteConnection(url: string): Promise<ReturnType<typeof acp.ndJsonStream>> {
-    this.ws = new WebSocket(url);
+  // ... initializeRemoteConnection, initializeLocalProcess ...
 
-    await new Promise<void>((resolve, reject) => {
-      this.ws!.onopen = () => resolve();
-      this.ws!.onerror = (e) => reject(new Error('WebSocket connection failed'));
-    });
+  // ========================================================================
+  // File System Operations (used in remote mode)
+  // ========================================================================
 
-    const input = new WritableStream<Uint8Array>({
-      write: (chunk) => { this.ws!.send(chunk); }
-    });
-
-    const output = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        this.ws!.onmessage = (event) => {
-          controller.enqueue(new Uint8Array(event.data));
-        };
-        this.ws!.onclose = () => controller.close();
-      }
-    });
-
-    return acp.ndJsonStream(input, output);
+  async readTextFile(params: acp.ReadTextFileRequest): Promise<acp.ReadTextFileResponse> {
+    // Use Obsidian Vault API to read files
+    // https://docs.obsidian.md/Reference/TypeScript+API/Vault/read
+    const file = this.plugin.app.vault.getAbstractFileByPath(params.path);
+    if (!file || !(file instanceof TFile)) {
+      throw new Error(`File not found: ${params.path}`);
+    }
+    const content = await this.plugin.app.vault.read(file);
+    return { content };
   }
 
-  private async initializeLocalProcess(config: AgentConfig): Promise<ReturnType<typeof acp.ndJsonStream>> {
-    // Existing spawn logic...
+  async writeTextFile(params: acp.WriteTextFileRequest): Promise<acp.WriteTextFileResponse> {
+    // Use Obsidian Vault API to write files
+    // https://docs.obsidian.md/Reference/TypeScript+API/Vault/modify
+    const file = this.plugin.app.vault.getAbstractFileByPath(params.path);
+    if (file && file instanceof TFile) {
+      await this.plugin.app.vault.modify(file, params.content);
+    } else {
+      // Create new file if it doesn't exist
+      await this.plugin.app.vault.create(params.path, params.content);
+    }
+    return {};
   }
 }
 ```
+
+**Key difference between modes:**
+
+| Mode | Filesystem | Terminal | Why |
+|------|------------|----------|-----|
+| Local (Desktop) | Agent handles directly | ✅ Client spawns processes | Agent runs locally with full access |
+| Remote (Mobile) | ✅ Client via Vault API | ❌ Not available | Agent can't access mobile filesystem |
 
 #### 2. Remote Agent Server (Already Exists)
 
@@ -240,7 +254,11 @@ if (!Platform.isDesktopApp && !settings.remoteAgent.enabled) {
 #### Phase 1: AcpAdapter Remote Support
 - [ ] Add `initializeRemoteConnection()` method to AcpAdapter
 - [ ] Add mode detection based on `config.remoteUrl`
-- [ ] Set `terminal: false` in capabilities when in remote mode
+- [ ] Set capabilities based on mode:
+  - Remote: `fs: { readTextFile: true, writeTextFile: true }, terminal: false`
+  - Local: `fs: { readTextFile: false, writeTextFile: false }, terminal: true`
+- [ ] Implement `readTextFile()` using Obsidian Vault API (`vault.read()`)
+- [ ] Implement `writeTextFile()` using Obsidian Vault API (`vault.modify()`, `vault.create()`)
 - [ ] Handle WebSocket lifecycle (connect, disconnect, reconnect)
 
 #### Phase 2: Settings & UI
@@ -263,27 +281,45 @@ if (!Platform.isDesktopApp && !settings.remoteAgent.enabled) {
 
 > **Note:** Terminal operations are NOT proxied through the remote server. Instead, the client declares `terminal: false` in its capabilities during ACP initialization. The agent will adapt its behavior accordingly (e.g., providing instructions instead of executing). This is the proper ACP approach - capability negotiation, not remote execution.
 
-## Terminal Operations on Mobile
+## Capability Negotiation
 
-### Capability Negotiation (The ACP Way)
+### The ACP Way
 
-ACP includes built-in capability negotiation during initialization. The client declares what it supports:
+ACP includes built-in capability negotiation during initialization. The client declares what it supports, and the agent adapts its behavior accordingly.
+
+### Capability Matrix by Mode
 
 ```typescript
-// Desktop: full capabilities
+// Local mode (Desktop): Agent handles files, client handles terminal
 clientCapabilities: {
-  fs: { readTextFile: false, writeTextFile: false },
-  terminal: true,
+  fs: { readTextFile: false, writeTextFile: false },  // Agent has direct access
+  terminal: true,                                      // Client spawns processes
 }
 
-// Mobile: no terminal
+// Remote mode (Mobile/Any): Client handles files, no terminal
 clientCapabilities: {
-  fs: { readTextFile: false, writeTextFile: false },
-  terminal: false,
+  fs: { readTextFile: true, writeTextFile: true },    // Client uses Vault API
+  terminal: false,                                     // Not available remotely
 }
 ```
 
-When `terminal: false`, the agent knows not to use shell commands and will adapt its approach (e.g., providing instructions instead of executing, or using alternative methods).
+### Why This Split?
+
+| Capability | Local Mode | Remote Mode | Reason |
+|------------|------------|-------------|--------|
+| `fs.readTextFile` | ❌ Agent handles | ✅ Client handles | Agent can't access mobile vault |
+| `fs.writeTextFile` | ❌ Agent handles | ✅ Client handles | Agent can't access mobile vault |
+| `terminal` | ✅ Client spawns | ❌ Not available | Security - no remote code execution |
+
+### File System Implementation (Remote Mode)
+
+When the agent requests file operations, the client uses Obsidian's Vault API:
+
+- **Read**: `vault.read(file)` - [Vault.read docs](https://docs.obsidian.md/Reference/TypeScript+API/Vault/read)
+- **Write**: `vault.modify(file, content)` - [Vault.modify docs](https://docs.obsidian.md/Reference/TypeScript+API/Vault/modify)
+- **Create**: `vault.create(path, content)` - [Vault.create docs](https://docs.obsidian.md/Reference/TypeScript+API/Vault/create)
+
+This allows the remote agent to work with files in the user's vault even though it runs on a different machine.
 
 ### Why NOT Proxy Terminal Commands
 
@@ -346,7 +382,8 @@ Mobile support is **technically feasible** through WebSocket transport, and the 
 
 | Component | Complexity | Status |
 |-----------|------------|--------|
-| AcpAdapter remote mode | Medium | To do - add WebSocket transport to existing adapter |
+| AcpAdapter remote mode | Medium | To do - add WebSocket transport |
+| Filesystem via Vault API | Low | To do - implement `readTextFile`/`writeTextFile` |
 | Remote Server | High | ✅ Complete - already developed |
 | Settings UI | Low | To do - add remote connection options |
 | Platform checks | Low | To do - update ChatView to allow mobile |
