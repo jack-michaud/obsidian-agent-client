@@ -322,23 +322,31 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 			},
 		});
 
+		const textEncoder = new TextEncoder();
+		const logger = this.logger;
 		const output = new ReadableStream<Uint8Array>({
 			start(controller) {
 				ws.onmessage = (event) => {
-					// Handle both string and ArrayBuffer data
+					logger.log("[AcpAdapter] WebSocket received:", event.data);
+					// Handle incoming messages - ndjson expects newline-terminated JSON
+					let data: string;
 					if (typeof event.data === "string") {
-						const encoder = new TextEncoder();
-						controller.enqueue(encoder.encode(event.data));
+						data = event.data;
 					} else if (event.data instanceof ArrayBuffer) {
-						controller.enqueue(new Uint8Array(event.data));
-					} else if (event.data instanceof Blob) {
-						// Handle Blob data (common in browser WebSocket)
-						event.data.arrayBuffer().then((buffer) => {
-							controller.enqueue(new Uint8Array(buffer));
-						});
+						data = textDecoder.decode(new Uint8Array(event.data));
+					} else {
+						// Blob - shouldn't happen with text messages, skip
+						logger.log("[AcpAdapter] Skipping Blob message");
+						return;
 					}
+					// Ensure message ends with newline for ndjson parser
+					if (!data.endsWith("\n")) {
+						data += "\n";
+					}
+					controller.enqueue(textEncoder.encode(data));
 				};
 				ws.onclose = () => {
+					logger.log("[AcpAdapter] WebSocket closed, closing stream");
 					controller.close();
 				};
 			},
