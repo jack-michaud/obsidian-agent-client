@@ -136,13 +136,15 @@ export class WebSocketAcpAdapter implements IAgentClient {
 }
 ```
 
-#### 2. Remote Agent Server
+#### 2. Remote Agent Server (Already Exists)
 
-A separate Node.js server that:
-- Accepts WebSocket connections from mobile clients
+An ACP Remote Server with WebSocket support has already been developed by the plugin author. This server:
+- Accepts WebSocket connections from mobile/remote clients
 - Spawns and manages local agent processes
 - Proxies ACP protocol messages between WebSocket and stdio
 - Handles authentication and security
+
+The remote server will be published separately and can be self-hosted by users who want mobile support.
 
 #### 3. Settings Updates
 
@@ -168,25 +170,22 @@ const adapter = Platform.isDesktopApp
 
 ### Phased Implementation
 
-#### Phase 1: Infrastructure
+#### Phase 1: Plugin Infrastructure
 - [ ] Create `WebSocketAcpAdapter` class implementing `IAgentClient`
 - [ ] Update settings to support remote agent configuration
 - [ ] Add platform detection for adapter selection
 
-#### Phase 2: Remote Server
-- [ ] Create standalone Node.js WebSocket server
-- [ ] Implement agent process management
-- [ ] Add authentication/security
+#### Phase 2: Remote Server ✅ (Complete)
+- [x] Create standalone Node.js WebSocket server
+- [x] Implement agent process management
+- [x] Proxy terminal operations through WebSocket
+- [x] Add authentication/security
 
-#### Phase 3: Terminal Support
-- [ ] Proxy terminal operations through WebSocket
-- [ ] Handle terminal output streaming
-- [ ] Implement timeout/cleanup
-
-#### Phase 4: Polish
+#### Phase 3: Integration & Polish
 - [ ] Connection status UI
 - [ ] Reconnection handling
 - [ ] Error messages and troubleshooting
+- [ ] Documentation for self-hosting the remote server
 
 ## Challenges and Considerations
 
@@ -208,28 +207,29 @@ const adapter = Platform.isDesktopApp
 2. **Network dependency** - Requires internet/local network
 3. **Error handling** - Connection drops, timeouts
 
-### Alternative Approaches
+### Deployment Options for Remote Server
 
-#### Option A: Companion Desktop App
-- Desktop app runs agent server
-- Mobile connects to desktop on same network
-- Simpler security (local network only)
+#### Option A: Local Network (Recommended)
+- Run remote server on desktop/home server
+- Mobile connects on same local network
+- Simpler security (no internet exposure)
+- Lower latency
 
-#### Option B: Cloud-Hosted Agent Service
-- Run agent server in cloud (user's own server)
-- Better for remote access
-- Higher setup complexity
+#### Option B: Cloud-Hosted
+- Run remote server in cloud (user's own VPS)
+- Accessible from anywhere
+- Requires proper security configuration (WSS, auth tokens)
 
-#### Option C: Agent-Specific Mobile SDKs
-- Some agents may offer native mobile APIs
+#### Option C: Future - Agent-Specific Mobile SDKs
+- Some agents may eventually offer native mobile APIs
 - Would require agent-specific adapters
 - Not currently available for Claude Code/Gemini
 
 ## Conclusion
 
-### Feasibility: ✅ YES (with significant effort)
+### Feasibility: ✅ YES
 
-Mobile support is **technically feasible** through WebSocket transport:
+Mobile support is **technically feasible** through WebSocket transport, and the most complex component (the remote server) has already been developed:
 
 1. **Obsidian supports WebSockets** on mobile
 2. **ACP is transport-agnostic** and can work over WebSocket
@@ -237,16 +237,16 @@ Mobile support is **technically feasible** through WebSocket transport:
 
 ### Effort Estimate
 
-| Component | Complexity | Notes |
-|-----------|------------|-------|
-| WebSocketAcpAdapter | Medium | New adapter implementation |
-| Remote Server | High | New project, security considerations |
-| Settings UI | Low | Add remote connection options |
-| Testing | High | Desktop + mobile, network scenarios |
+| Component | Complexity | Status |
+|-----------|------------|--------|
+| WebSocketAcpAdapter | Medium | To do - new adapter implementation |
+| Remote Server | High | ✅ Complete - already developed |
+| Settings UI | Low | To do - add remote connection options |
+| Testing | Medium | To do - desktop + mobile scenarios |
 
 ### Recommendations
 
-1. **Start with Phase 1** - Create WebSocket adapter, validate concept
-2. **Consider companion app approach** - Simpler security model
-3. **Document self-hosting** - Clear instructions for running remote server
-4. **Maintain desktop-first** - Keep local process support as primary
+1. **Implement WebSocketAcpAdapter** - Create the plugin-side adapter to connect to the existing remote server
+2. **Document self-hosting** - Clear instructions for users to run the remote server
+3. **Maintain desktop-first** - Keep local process support as the default for desktop users
+4. **Graceful fallback** - Show helpful message on mobile if remote server is not configured
