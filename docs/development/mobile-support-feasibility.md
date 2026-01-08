@@ -96,10 +96,12 @@ const stream = acp.ndJsonStream(input, output);
 ├─────────────────────────────────────────────────────────────────┤
 │  IAgentClient Interface                                         │
 │  ├── AcpAdapter (Desktop)        - Local process via stdio      │
+│  │                                 terminal: true               │
 │  └── WebSocketAcpAdapter (NEW)   - Remote agent via WebSocket   │
+│                                    terminal: false              │
 └─────────────────────────────────────────────────────────────────┘
                               │
-                              │ WebSocket
+                              │ WebSocket (JSON-RPC messages only)
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Remote Agent Server                          │
@@ -107,8 +109,7 @@ const stream = acp.ndJsonStream(input, output);
 ├─────────────────────────────────────────────────────────────────┤
 │  - WebSocket server accepting connections                       │
 │  - Spawns local agent processes (Claude Code, etc.)             │
-│  - Proxies ACP protocol messages                                │
-│  - Handles terminal operations                                  │
+│  - Proxies ACP protocol messages (no terminal execution)        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -130,6 +131,17 @@ export class WebSocketAcpAdapter implements IAgentClient {
     // Create streams from WebSocket
     const { input, output } = this.createStreamsFromWebSocket(this.ws);
     const stream = acp.ndJsonStream(input, output);
+
+    this.connection = new acp.ClientSideConnection(() => this, stream);
+
+    // Initialize with terminal: false - agent will not attempt shell commands
+    const initResult = await this.connection.initialize({
+      protocolVersion: acp.PROTOCOL_VERSION,
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,  // No terminal support on mobile
+      },
+    });
 
     // Rest of initialization...
   }
@@ -178,14 +190,48 @@ const adapter = Platform.isDesktopApp
 #### Phase 2: Remote Server ✅ (Complete)
 - [x] Create standalone Node.js WebSocket server
 - [x] Implement agent process management
-- [x] Proxy terminal operations through WebSocket
+- [x] Proxy ACP protocol messages
 - [x] Add authentication/security
+
+> **Note:** Terminal operations are NOT proxied through the remote server. Instead, the mobile client declares `terminal: false` in its client capabilities during ACP initialization. The agent will adapt its behavior accordingly (e.g., not attempting to run shell commands). This is the proper ACP approach - capability negotiation, not remote execution.
 
 #### Phase 3: Integration & Polish
 - [ ] Connection status UI
 - [ ] Reconnection handling
 - [ ] Error messages and troubleshooting
 - [ ] Documentation for self-hosting the remote server
+
+## Terminal Operations on Mobile
+
+### Capability Negotiation (The ACP Way)
+
+ACP includes built-in capability negotiation during initialization. The client declares what it supports:
+
+```typescript
+// Desktop: full capabilities
+clientCapabilities: {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: true,
+}
+
+// Mobile: no terminal
+clientCapabilities: {
+  fs: { readTextFile: false, writeTextFile: false },
+  terminal: false,
+}
+```
+
+When `terminal: false`, the agent knows not to use shell commands and will adapt its approach (e.g., providing instructions instead of executing, or using alternative methods).
+
+### Why NOT Proxy Terminal Commands
+
+Proxying terminal operations through the remote server would be problematic:
+- **Security risk** - Remote code execution vulnerabilities
+- **Context mismatch** - Server's filesystem ≠ user's intent
+- **Complexity** - Would need to handle stdout/stderr streaming, exit codes, timeouts
+- **Not the ACP way** - Capability negotiation exists for this reason
+
+The proper approach is to let the agent adapt to the client's capabilities.
 
 ## Challenges and Considerations
 
@@ -198,8 +244,7 @@ const adapter = Platform.isDesktopApp
 ### Performance
 
 1. **Latency** - Network round-trip for each message
-2. **Terminal streaming** - May feel less responsive
-3. **Large payloads** - Image/file transfers
+2. **Large payloads** - Image/file transfers may be slower
 
 ### User Experience
 
