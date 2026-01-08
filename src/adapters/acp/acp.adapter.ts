@@ -1336,44 +1336,6 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	// ========================================================================
 
 	/**
-	 * Convert an absolute file path to a vault-relative path.
-	 * The agent sends absolute paths (e.g., /Users/Jack/Vault/Personal/notes/file.md)
-	 * but Obsidian's Vault API expects paths relative to the vault root (e.g., notes/file.md).
-	 */
-	private toVaultRelativePath(absolutePath: string): string {
-		const cwd = this.currentConfig?.workingDirectory;
-		if (!cwd) {
-			this.logger.log(
-				"[AcpAdapter] No working directory set, using path as-is:",
-				absolutePath,
-			);
-			return absolutePath;
-		}
-
-		// Normalize paths (remove trailing slashes)
-		const normalizedCwd = cwd.endsWith("/") ? cwd.slice(0, -1) : cwd;
-		const normalizedPath = absolutePath.startsWith("/")
-			? absolutePath
-			: `/${absolutePath}`;
-
-		// Strip the cwd prefix if present
-		if (normalizedPath.startsWith(normalizedCwd + "/")) {
-			const relativePath = normalizedPath.slice(normalizedCwd.length + 1);
-			this.logger.log(
-				`[AcpAdapter] Converted path: ${absolutePath} -> ${relativePath}`,
-			);
-			return relativePath;
-		}
-
-		// Path doesn't start with cwd, use as-is (might already be relative)
-		this.logger.log(
-			"[AcpAdapter] Path not under cwd, using as-is:",
-			absolutePath,
-		);
-		return absolutePath;
-	}
-
-	/**
 	 * Read a text file from the vault.
 	 * Used in remote mode where the agent can't directly access the client's filesystem.
 	 */
@@ -1383,11 +1345,11 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		this.logger.log(`[AcpAdapter] readTextFile: ${params.path}`);
 
 		try {
-			const vaultPath = this.toVaultRelativePath(params.path);
-			const file =
-				this.plugin.app.vault.getAbstractFileByPath(vaultPath);
+			const file = this.plugin.app.vault.getAbstractFileByPath(
+				params.path,
+			);
 			if (!file || !(file instanceof TFile)) {
-				throw new Error(`File not found: ${params.path} (vault path: ${vaultPath})`);
+				throw new Error(`File not found: ${params.path}`);
 			}
 			const content = await this.plugin.app.vault.read(file);
 			return { content };
@@ -1410,17 +1372,17 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		this.logger.log(`[AcpAdapter] writeTextFile: ${params.path}`);
 
 		try {
-			const vaultPath = this.toVaultRelativePath(params.path);
-			const file =
-				this.plugin.app.vault.getAbstractFileByPath(vaultPath);
+			const file = this.plugin.app.vault.getAbstractFileByPath(
+				params.path,
+			);
 			if (file && file instanceof TFile) {
 				// Modify existing file
 				await this.plugin.app.vault.modify(file, params.content);
 			} else {
 				// Create new file (ensure parent directories exist)
-				const parentPath = vaultPath.substring(
+				const parentPath = params.path.substring(
 					0,
-					vaultPath.lastIndexOf("/"),
+					params.path.lastIndexOf("/"),
 				);
 				if (parentPath) {
 					const parentFolder =
@@ -1429,7 +1391,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 						await this.plugin.app.vault.createFolder(parentPath);
 					}
 				}
-				await this.plugin.app.vault.create(vaultPath, params.content);
+				await this.plugin.app.vault.create(params.path, params.content);
 			}
 			return {};
 		} catch (error) {
