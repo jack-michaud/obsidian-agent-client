@@ -3,6 +3,8 @@
 !.vscode/settings.json
 !.vscode/extensions.json
 
+logs
+
 .vscode/launch.json
 
 # Zed
