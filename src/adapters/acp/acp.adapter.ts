@@ -310,11 +310,14 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		};
 
 		// Create streams from WebSocket
+		// Note: ACP uses ndjson (text), so we send as text strings, not binary
 		const ws = this.ws;
+		const textDecoder = new TextDecoder();
 		const input = new WritableStream<Uint8Array>({
 			write(chunk: Uint8Array) {
 				if (ws.readyState === WebSocket.OPEN) {
-					ws.send(chunk);
+					// Convert Uint8Array to string for text-based WebSocket transport
+					ws.send(textDecoder.decode(chunk));
 				}
 			},
 		});
