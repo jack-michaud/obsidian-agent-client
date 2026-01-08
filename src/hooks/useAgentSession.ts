@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { Platform } from "obsidian";
 import type {
 	ChatSession,
 	SessionState,
@@ -195,6 +196,7 @@ function findAgentSettings(
 
 /**
  * Build AgentConfig with API key injection for known agents.
+ * Also adds remote URL if remote mode is enabled.
  */
 function buildAgentConfigWithApiKey(
 	settings: AgentClientPluginSettings,
@@ -204,11 +206,28 @@ function buildAgentConfigWithApiKey(
 ) {
 	const baseConfig = toAgentConfig(agentSettings, workingDirectory);
 
+	// Determine if remote mode should be used:
+	// - On mobile: always use remote (local process not available)
+	// - On desktop: use remote only if explicitly enabled
+	const shouldUseRemote =
+		!Platform.isDesktopApp ||
+		(settings.remoteAgent.enabled &&
+			settings.remoteAgent.url.trim().length > 0);
+
+	// Add remote URL if remote mode is active
+	const remoteConfig = shouldUseRemote
+		? {
+				remoteUrl: settings.remoteAgent.url,
+				remoteAuthToken: settings.remoteAgent.authToken,
+			}
+		: {};
+
 	// Add API keys to environment for Claude, Codex, and Gemini
 	if (agentId === settings.claude.id) {
 		const claudeSettings = agentSettings as ClaudeAgentSettings;
 		return {
 			...baseConfig,
+			...remoteConfig,
 			env: {
 				...baseConfig.env,
 				ANTHROPIC_API_KEY: claudeSettings.apiKey,
@@ -219,6 +238,7 @@ function buildAgentConfigWithApiKey(
 		const codexSettings = agentSettings as CodexAgentSettings;
 		return {
 			...baseConfig,
+			...remoteConfig,
 			env: {
 				...baseConfig.env,
 				OPENAI_API_KEY: codexSettings.apiKey,
@@ -229,6 +249,7 @@ function buildAgentConfigWithApiKey(
 		const geminiSettings = agentSettings as GeminiAgentSettings;
 		return {
 			...baseConfig,
+			...remoteConfig,
 			env: {
 				...baseConfig.env,
 				GOOGLE_API_KEY: geminiSettings.apiKey,
@@ -236,8 +257,11 @@ function buildAgentConfigWithApiKey(
 		};
 	}
 
-	// Custom agents - no API key injection
-	return baseConfig;
+	// Custom agents - no API key injection, but still add remote config
+	return {
+		...baseConfig,
+		...remoteConfig,
+	};
 }
 
 // ============================================================================

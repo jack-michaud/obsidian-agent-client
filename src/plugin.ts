@@ -56,6 +56,12 @@ export interface AgentClientPluginSettings {
 	windowsWslDistribution?: string;
 	// Input behavior
 	sendMessageShortcut: SendMessageShortcut;
+	// Remote agent settings (for mobile support)
+	remoteAgent: {
+		enabled: boolean;
+		url: string;
+		authToken?: string;
+	};
 }
 
 const DEFAULT_SETTINGS: AgentClientPluginSettings = {
@@ -102,6 +108,11 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 	windowsWslMode: false,
 	windowsWslDistribution: undefined,
 	sendMessageShortcut: "enter",
+	remoteAgent: {
+		enabled: false,
+		url: "",
+		authToken: undefined,
+	},
 };
 
 export default class AgentClientPlugin extends Plugin {
@@ -514,6 +525,29 @@ export default class AgentClientPlugin extends Plugin {
 				rawSettings.sendMessageShortcut === "cmd-enter"
 					? rawSettings.sendMessageShortcut
 					: DEFAULT_SETTINGS.sendMessageShortcut,
+			remoteAgent: (() => {
+				const rawRemote = rawSettings.remoteAgent as
+					| Record<string, unknown>
+					| null
+					| undefined;
+				if (rawRemote && typeof rawRemote === "object") {
+					return {
+						enabled:
+							typeof rawRemote.enabled === "boolean"
+								? rawRemote.enabled
+								: DEFAULT_SETTINGS.remoteAgent.enabled,
+						url:
+							typeof rawRemote.url === "string"
+								? rawRemote.url
+								: DEFAULT_SETTINGS.remoteAgent.url,
+						authToken:
+							typeof rawRemote.authToken === "string"
+								? rawRemote.authToken
+								: DEFAULT_SETTINGS.remoteAgent.authToken,
+					};
+				}
+				return DEFAULT_SETTINGS.remoteAgent;
+			})(),
 		};
 
 		this.ensureActiveAgentId();

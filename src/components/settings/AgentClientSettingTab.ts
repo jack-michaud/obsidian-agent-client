@@ -66,6 +66,9 @@ export class AgentClientSettingTab extends PluginSettingTab {
 					});
 			});
 
+		// Remote Agent Settings
+		this.renderRemoteAgentSettings(containerEl);
+
 		new Setting(containerEl)
 			.setName("Auto-allow permissions")
 			.setDesc(
@@ -441,6 +444,72 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			seen.add(id);
 			return true;
 		});
+	}
+
+	private renderRemoteAgentSettings(containerEl: HTMLElement) {
+		new Setting(containerEl).setName("Remote agent").setHeading();
+
+		const descEl = containerEl.createEl("p", {
+			cls: "setting-item-description",
+		});
+		descEl.setText(
+			"Connect to a remote agent server instead of running agents locally. " +
+				"Required for mobile devices, optional on desktop.",
+		);
+
+		new Setting(containerEl)
+			.setName("Enable remote mode")
+			.setDesc(
+				Platform.isDesktopApp
+					? "Use a remote agent server instead of local processes."
+					: "Required on mobile - agents cannot run locally on mobile devices.",
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.remoteAgent.enabled)
+					.onChange(async (value) => {
+						this.plugin.settings.remoteAgent.enabled = value;
+						await this.plugin.saveSettings();
+						this.display(); // Refresh to show/hide URL settings
+					}),
+			);
+
+		// Only show URL/token settings when remote mode is enabled (or always on mobile)
+		if (
+			this.plugin.settings.remoteAgent.enabled ||
+			!Platform.isDesktopApp
+		) {
+			new Setting(containerEl)
+				.setName("Server URL")
+				.setDesc(
+					"WebSocket URL of the remote agent server (e.g., ws://localhost:8080 or wss://your-server.com)",
+				)
+				.addText((text) =>
+					text
+						.setPlaceholder("ws://localhost:8080")
+						.setValue(this.plugin.settings.remoteAgent.url)
+						.onChange(async (value) => {
+							this.plugin.settings.remoteAgent.url = value.trim();
+							await this.plugin.saveSettings();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("Auth token")
+				.setDesc(
+					"Optional authentication token for the remote server. (Stored as plain text)",
+				)
+				.addText((text) => {
+					text.setPlaceholder("Optional auth token")
+						.setValue(this.plugin.settings.remoteAgent.authToken || "")
+						.onChange(async (value) => {
+							this.plugin.settings.remoteAgent.authToken =
+								value.trim() || undefined;
+							await this.plugin.saveSettings();
+						});
+					text.inputEl.type = "password";
+				});
+		}
 	}
 
 	private renderGeminiSettings(sectionEl: HTMLElement) {

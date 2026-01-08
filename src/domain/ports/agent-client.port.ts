@@ -41,7 +41,7 @@ export interface AgentConfig {
 	/** Display name for the agent */
 	displayName: string;
 
-	/** Command to execute (full path to executable) */
+	/** Command to execute (full path to executable). Required for local mode. */
 	command: string;
 
 	/** Command-line arguments */
@@ -55,6 +55,19 @@ export interface AgentConfig {
 
 	/** Working directory for the agent session */
 	workingDirectory: string;
+
+	/**
+	 * WebSocket URL for remote agent connection.
+	 * If provided, the adapter will connect via WebSocket instead of spawning a local process.
+	 * Used for mobile support where local process spawning is not available.
+	 */
+	remoteUrl?: string;
+
+	/**
+	 * Authentication token for remote agent connection.
+	 * Sent as part of the WebSocket handshake or initial message.
+	 */
+	remoteAuthToken?: string;
 }
 
 /**

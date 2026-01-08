@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import * as acp from "@agentclientprotocol/sdk";
-import { Platform } from "obsidian";
+import { Platform, TFile } from "obsidian";
 
 import type {
 	IAgentClient,
@@ -64,7 +64,9 @@ export interface IAcpClient extends acp.Client {
  */
 export class AcpAdapter implements IAgentClient, IAcpClient {
 	private connection: acp.ClientSideConnection | null = null;
-	private agentProcess: ChildProcess | null = null;
+	private agentProcess: ChildProcess | null = null; // Only used in local mode
+	private ws: WebSocket | null = null; // Only used in remote mode
+	private isRemoteMode = false;
 	private logger: Logger;
 
 	// Session update callback (unified callback for all session updates)
@@ -128,18 +130,106 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 
 	/**
 	 * Initialize connection to an AI agent.
-	 * Spawns the agent process and establishes ACP connection.
+	 * Supports two modes:
+	 * - Local mode: Spawns the agent process and establishes ACP connection via stdio
+	 * - Remote mode: Connects to a remote agent server via WebSocket
 	 */
 	async initialize(config: AgentConfig): Promise<InitializeResult> {
 		this.logger.log(
 			"[AcpAdapter] Starting initialization with config:",
 			config,
 		);
+
+		// Clean up existing connections
+		await this.cleanupExistingConnections();
+
+		this.currentConfig = config;
+
+		// Update auto-allow permissions from plugin settings
+		this.autoAllowPermissions = this.plugin.settings.autoAllowPermissions;
+
+		// Determine mode based on config
+		this.isRemoteMode = !!config.remoteUrl;
 		this.logger.log(
-			`[AcpAdapter] Current state - process: ${!!this.agentProcess}, PID: ${this.agentProcess?.pid}`,
+			`[AcpAdapter] Mode: ${this.isRemoteMode ? "remote" : "local"}`,
 		);
 
-		// Clean up existing process if any (e.g., when switching agents)
+		let stream: ReturnType<typeof acp.ndJsonStream>;
+
+		if (this.isRemoteMode) {
+			// Remote mode: connect via WebSocket
+			stream = await this.initializeRemoteConnection(
+				config.remoteUrl!,
+				config.remoteAuthToken,
+			);
+		} else {
+			// Local mode: spawn process (existing logic)
+			stream = await this.initializeLocalProcess(config);
+		}
+
+		this.connection = new acp.ClientSideConnection(() => this, stream);
+
+		try {
+			this.logger.log("[AcpAdapter] Starting ACP initialization...");
+
+			// Initialize with appropriate capabilities based on mode
+			// Remote mode: client handles filesystem (agent can't access mobile vault)
+			// Local mode: agent handles filesystem directly
+			const initResult = await this.connection.initialize({
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: {
+					fs: {
+						readTextFile: this.isRemoteMode, // Client handles file reads in remote mode
+						writeTextFile: this.isRemoteMode, // Client handles file writes in remote mode
+					},
+					terminal: !this.isRemoteMode, // No terminal in remote mode
+				},
+			});
+
+			this.logger.log(
+				`[AcpAdapter] ✅ Connected to agent (protocol v${initResult.protocolVersion})`,
+			);
+			this.logger.log(
+				"[AcpAdapter] Auth methods:",
+				initResult.authMethods,
+			);
+			this.logger.log(
+				"[AcpAdapter] Agent capabilities:",
+				initResult.agentCapabilities,
+			);
+
+			// Mark as initialized and store agent ID
+			this.isInitializedFlag = true;
+			this.currentAgentId = config.id;
+
+			// Extract prompt capabilities from agent capabilities
+			const promptCaps = initResult.agentCapabilities?.promptCapabilities;
+
+			return {
+				protocolVersion: initResult.protocolVersion,
+				authMethods: initResult.authMethods || [],
+				promptCapabilities: {
+					image: promptCaps?.image ?? false,
+					audio: promptCaps?.audio ?? false,
+					embeddedContext: promptCaps?.embeddedContext ?? false,
+				},
+			};
+		} catch (error) {
+			this.logger.error("[AcpAdapter] Initialization Error:", error);
+
+			// Reset flags on failure
+			this.isInitializedFlag = false;
+			this.currentAgentId = null;
+
+			throw error;
+		}
+	}
+
+	/**
+	 * Clean up existing connections before initializing a new one.
+	 */
+	private async cleanupExistingConnections(): Promise<void> {
+		// Clean up existing process if any (local mode)
 		if (this.agentProcess) {
 			this.logger.log(
 				`[AcpAdapter] Killing existing process (PID: ${this.agentProcess.pid})`,
@@ -148,17 +238,118 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 			this.agentProcess = null;
 		}
 
+		// Clean up existing WebSocket if any (remote mode)
+		if (this.ws) {
+			this.logger.log("[AcpAdapter] Closing existing WebSocket");
+			this.ws.close();
+			this.ws = null;
+		}
+
 		// Clean up existing connection
 		if (this.connection) {
 			this.logger.log("[AcpAdapter] Cleaning up existing connection");
 			this.connection = null;
 		}
+	}
 
-		this.currentConfig = config;
+	/**
+	 * Initialize a remote WebSocket connection to an agent server.
+	 */
+	private async initializeRemoteConnection(
+		url: string,
+		authToken?: string,
+	): Promise<ReturnType<typeof acp.ndJsonStream>> {
+		this.logger.log(`[AcpAdapter] Connecting to remote agent at: ${url}`);
 
-		// Update auto-allow permissions from plugin settings
-		this.autoAllowPermissions = this.plugin.settings.autoAllowPermissions;
+		// Create WebSocket connection
+		// If auth token is provided, append it as a query parameter
+		const wsUrl = authToken
+			? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(authToken)}`
+			: url;
 
+		this.ws = new WebSocket(wsUrl);
+
+		// Wait for connection to open
+		await new Promise<void>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				reject(new Error("WebSocket connection timeout"));
+			}, 30000); // 30 second timeout
+
+			this.ws!.onopen = () => {
+				clearTimeout(timeout);
+				this.logger.log("[AcpAdapter] WebSocket connected");
+				resolve();
+			};
+
+			this.ws!.onerror = (event) => {
+				clearTimeout(timeout);
+				this.logger.error("[AcpAdapter] WebSocket error:", event);
+				reject(new Error("WebSocket connection failed"));
+			};
+		});
+
+		// Set up error and close handlers
+		this.ws.onerror = (event) => {
+			this.logger.error("[AcpAdapter] WebSocket error:", event);
+			const agentError: AgentError = {
+				id: crypto.randomUUID(),
+				category: "connection",
+				severity: "error",
+				title: "Remote Connection Error",
+				message: "WebSocket connection error occurred",
+				occurredAt: new Date(),
+				agentId: this.currentConfig?.id || "unknown",
+			};
+			this.errorCallback?.(agentError);
+		};
+
+		this.ws.onclose = (event) => {
+			this.logger.log(
+				`[AcpAdapter] WebSocket closed: code=${event.code}, reason=${event.reason}`,
+			);
+		};
+
+		// Create streams from WebSocket
+		const ws = this.ws;
+		const input = new WritableStream<Uint8Array>({
+			write(chunk: Uint8Array) {
+				if (ws.readyState === WebSocket.OPEN) {
+					ws.send(chunk);
+				}
+			},
+		});
+
+		const output = new ReadableStream<Uint8Array>({
+			start(controller) {
+				ws.onmessage = (event) => {
+					// Handle both string and ArrayBuffer data
+					if (typeof event.data === "string") {
+						const encoder = new TextEncoder();
+						controller.enqueue(encoder.encode(event.data));
+					} else if (event.data instanceof ArrayBuffer) {
+						controller.enqueue(new Uint8Array(event.data));
+					} else if (event.data instanceof Blob) {
+						// Handle Blob data (common in browser WebSocket)
+						event.data.arrayBuffer().then((buffer) => {
+							controller.enqueue(new Uint8Array(buffer));
+						});
+					}
+				};
+				ws.onclose = () => {
+					controller.close();
+				};
+			},
+		});
+
+		return acp.ndJsonStream(input, output);
+	}
+
+	/**
+	 * Initialize a local agent process via stdio.
+	 */
+	private async initializeLocalProcess(
+		config: AgentConfig,
+	): Promise<ReturnType<typeof acp.ndJsonStream>> {
 		// Validate command
 		if (!config.command || config.command.trim().length === 0) {
 			throw new Error(
@@ -391,60 +582,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 			config.workingDirectory,
 		);
 
-		const stream = acp.ndJsonStream(input, output);
-		this.connection = new acp.ClientSideConnection(() => this, stream);
-
-		try {
-			this.logger.log("[AcpAdapter] Starting ACP initialization...");
-
-			const initResult = await this.connection.initialize({
-				protocolVersion: acp.PROTOCOL_VERSION,
-				clientCapabilities: {
-					fs: {
-						readTextFile: false,
-						writeTextFile: false,
-					},
-					terminal: true,
-				},
-			});
-
-			this.logger.log(
-				`[AcpAdapter] ✅ Connected to agent (protocol v${initResult.protocolVersion})`,
-			);
-			this.logger.log(
-				"[AcpAdapter] Auth methods:",
-				initResult.authMethods,
-			);
-			this.logger.log(
-				"[AcpAdapter] Agent capabilities:",
-				initResult.agentCapabilities,
-			);
-
-			// Mark as initialized and store agent ID
-			this.isInitializedFlag = true;
-			this.currentAgentId = config.id;
-
-			// Extract prompt capabilities from agent capabilities
-			const promptCaps = initResult.agentCapabilities?.promptCapabilities;
-
-			return {
-				protocolVersion: initResult.protocolVersion,
-				authMethods: initResult.authMethods || [],
-				promptCapabilities: {
-					image: promptCaps?.image ?? false,
-					audio: promptCaps?.audio ?? false,
-					embeddedContext: promptCaps?.embeddedContext ?? false,
-				},
-			};
-		} catch (error) {
-			this.logger.error("[AcpAdapter] Initialization Error:", error);
-
-			// Reset flags on failure
-			this.isInitializedFlag = false;
-			this.currentAgentId = null;
-
-			throw error;
-		}
+		return acp.ndJsonStream(input, output);
 	}
 
 	/**
@@ -675,13 +813,20 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		// Cancel all pending operations
 		this.cancelAllOperations();
 
-		// Kill the agent process
+		// Kill the agent process (local mode)
 		if (this.agentProcess) {
 			this.logger.log(
 				`[AcpAdapter] Killing agent process (PID: ${this.agentProcess.pid})`,
 			);
 			this.agentProcess.kill();
 			this.agentProcess = null;
+		}
+
+		// Close WebSocket (remote mode)
+		if (this.ws) {
+			this.logger.log("[AcpAdapter] Closing WebSocket");
+			this.ws.close();
+			this.ws = null;
 		}
 
 		// Clear connection and config references
@@ -691,6 +836,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		// Reset initialization state
 		this.isInitializedFlag = false;
 		this.currentAgentId = null;
+		this.isRemoteMode = false;
 
 		this.logger.log("[AcpAdapter] Disconnected");
 		return Promise.resolve();
@@ -702,11 +848,16 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	 * Implementation of IAgentClient.isInitialized()
 	 */
 	isInitialized(): boolean {
-		return (
-			this.isInitializedFlag &&
-			this.connection !== null &&
-			this.agentProcess !== null
-		);
+		if (!this.isInitializedFlag || !this.connection) {
+			return false;
+		}
+
+		// Check mode-specific connection
+		if (this.isRemoteMode) {
+			return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
+		} else {
+			return this.agentProcess !== null;
+		}
 	}
 
 	/**
@@ -1170,16 +1321,80 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	}
 
 	// ========================================================================
-	// Terminal Operations (IAcpClient)
+	// File System Operations (IAcpClient) - Used in remote mode
 	// ========================================================================
 
-	readTextFile(params: acp.ReadTextFileRequest) {
-		return Promise.resolve({ content: "" });
+	/**
+	 * Read a text file from the vault.
+	 * Used in remote mode where the agent can't directly access the client's filesystem.
+	 */
+	async readTextFile(
+		params: acp.ReadTextFileRequest,
+	): Promise<acp.ReadTextFileResponse> {
+		this.logger.log(`[AcpAdapter] readTextFile: ${params.path}`);
+
+		try {
+			const file = this.plugin.app.vault.getAbstractFileByPath(
+				params.path,
+			);
+			if (!file || !(file instanceof TFile)) {
+				throw new Error(`File not found: ${params.path}`);
+			}
+			const content = await this.plugin.app.vault.read(file);
+			return { content };
+		} catch (error) {
+			this.logger.error(
+				`[AcpAdapter] readTextFile error for ${params.path}:`,
+				error,
+			);
+			throw error;
+		}
 	}
 
-	writeTextFile(params: acp.WriteTextFileRequest) {
-		return Promise.resolve({});
+	/**
+	 * Write a text file to the vault.
+	 * Used in remote mode where the agent can't directly access the client's filesystem.
+	 */
+	async writeTextFile(
+		params: acp.WriteTextFileRequest,
+	): Promise<acp.WriteTextFileResponse> {
+		this.logger.log(`[AcpAdapter] writeTextFile: ${params.path}`);
+
+		try {
+			const file = this.plugin.app.vault.getAbstractFileByPath(
+				params.path,
+			);
+			if (file && file instanceof TFile) {
+				// Modify existing file
+				await this.plugin.app.vault.modify(file, params.content);
+			} else {
+				// Create new file (ensure parent directories exist)
+				const parentPath = params.path.substring(
+					0,
+					params.path.lastIndexOf("/"),
+				);
+				if (parentPath) {
+					const parentFolder =
+						this.plugin.app.vault.getAbstractFileByPath(parentPath);
+					if (!parentFolder) {
+						await this.plugin.app.vault.createFolder(parentPath);
+					}
+				}
+				await this.plugin.app.vault.create(params.path, params.content);
+			}
+			return {};
+		} catch (error) {
+			this.logger.error(
+				`[AcpAdapter] writeTextFile error for ${params.path}:`,
+				error,
+			);
+			throw error;
+		}
 	}
+
+	// ========================================================================
+	// Terminal Operations (IAcpClient) - Used in local mode
+	// ========================================================================
 
 	createTerminal(
 		params: acp.CreateTerminalRequest,

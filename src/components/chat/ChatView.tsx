@@ -45,6 +45,29 @@ interface AppWithSettings {
 
 export const VIEW_TYPE_CHAT = "agent-client-chat-view";
 
+/**
+ * Mobile-only component shown when remote agent is not configured.
+ */
+function MobileSetupRequired({ onOpenSettings }: { onOpenSettings: () => void }) {
+	return (
+		<div className="agent-client-chat-view-container">
+			<div className="agent-client-mobile-setup">
+				<h3>Remote Agent Required</h3>
+				<p>
+					To use Agent Client on mobile, you need to configure a remote agent server.
+				</p>
+				<p>
+					The remote server runs on your desktop or a server, and allows your mobile device
+					to connect to AI agents over the network.
+				</p>
+				<button onClick={onOpenSettings}>
+					Open Settings
+				</button>
+			</div>
+		</div>
+	);
+}
+
 function ChatComponent({
 	plugin,
 	view,
@@ -53,10 +76,19 @@ function ChatComponent({
 	view: ChatView;
 }) {
 	// ============================================================
-	// Platform Check
+	// Platform & Remote Mode Check
 	// ============================================================
-	if (!Platform.isDesktopApp) {
-		throw new Error("Agent Client is only available on desktop");
+	const remoteAgentSettings = plugin.settings.remoteAgent;
+	const isRemoteEnabled = remoteAgentSettings.enabled && remoteAgentSettings.url.trim().length > 0;
+
+	// On mobile, require remote agent to be configured
+	if (!Platform.isDesktopApp && !isRemoteEnabled) {
+		const handleOpenSettings = () => {
+			const appWithSettings = plugin.app as unknown as AppWithSettings;
+			appWithSettings.setting.open();
+			appWithSettings.setting.openTabById(plugin.manifest.id);
+		};
+		return <MobileSetupRequired onOpenSettings={handleOpenSettings} />;
 	}
 
 	// ============================================================
@@ -65,10 +97,18 @@ function ChatComponent({
 	const logger = useMemo(() => new Logger(plugin), [plugin]);
 
 	const vaultPath = useMemo(() => {
-		return (
-			(plugin.app.vault.adapter as VaultAdapterWithBasePath).basePath ||
-			process.cwd()
-		);
+		// On mobile, basePath should always be available from the vault adapter
+		// On desktop, fall back to working directory if needed
+		const basePath = (plugin.app.vault.adapter as VaultAdapterWithBasePath).basePath;
+		if (basePath) {
+			return basePath;
+		}
+		// Desktop-only fallback (process.cwd is not available on mobile)
+		if (Platform.isDesktopApp) {
+			return process.cwd();
+		}
+		// Mobile fallback - use empty string (should not reach here with proper vault adapter)
+		return "";
 	}, [plugin]);
 
 	const noteMentionService = useMemo(
