@@ -94,11 +94,11 @@ const stream = acp.ndJsonStream(input, output);
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Obsidian (Desktop/Mobile)                   │
 ├─────────────────────────────────────────────────────────────────┤
-│  IAgentClient Interface                                         │
-│  ├── AcpAdapter (Desktop)        - Local process via stdio      │
-│  │                                 terminal: true               │
-│  └── WebSocketAcpAdapter (NEW)   - Remote agent via WebSocket   │
-│                                    terminal: false              │
+│  AcpAdapter (Extended)                                          │
+│  ├── Local Mode (Desktop)    - Spawns process, stdio transport  │
+│  │                             terminal: true                   │
+│  └── Remote Mode (Any)       - WebSocket transport              │
+│                                terminal: false                  │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               │ WebSocket (JSON-RPC messages only)
@@ -115,35 +115,71 @@ const stream = acp.ndJsonStream(input, output);
 
 ### Required Changes
 
-#### 1. New WebSocket Adapter
+#### 1. Extend AcpAdapter with Remote Support
 
-Create `adapters/acp/websocket-acp.adapter.ts`:
+Modify `adapters/acp/acp.adapter.ts` to support both local and remote connections:
 
 ```typescript
-export class WebSocketAcpAdapter implements IAgentClient {
-  private ws: WebSocket | null = null;
+export class AcpAdapter implements IAgentClient, IAcpClient {
   private connection: acp.ClientSideConnection | null = null;
+  private agentProcess: ChildProcess | null = null;  // Only used in local mode
+  private ws: WebSocket | null = null;               // Only used in remote mode
+  private isRemoteMode: boolean = false;
 
   async initialize(config: AgentConfig): Promise<InitializeResult> {
-    // Connect to remote agent server via WebSocket
-    this.ws = new WebSocket(config.remoteUrl);
+    // Determine mode based on config
+    this.isRemoteMode = !!config.remoteUrl;
 
-    // Create streams from WebSocket
-    const { input, output } = this.createStreamsFromWebSocket(this.ws);
-    const stream = acp.ndJsonStream(input, output);
+    let stream: ReturnType<typeof acp.ndJsonStream>;
+
+    if (this.isRemoteMode) {
+      // Remote mode: connect via WebSocket
+      stream = await this.initializeRemoteConnection(config.remoteUrl);
+    } else {
+      // Local mode: spawn process (existing logic)
+      stream = await this.initializeLocalProcess(config);
+    }
 
     this.connection = new acp.ClientSideConnection(() => this, stream);
 
-    // Initialize with terminal: false - agent will not attempt shell commands
+    // Initialize with appropriate capabilities
     const initResult = await this.connection.initialize({
       protocolVersion: acp.PROTOCOL_VERSION,
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,  // No terminal support on mobile
+        terminal: !this.isRemoteMode,  // No terminal in remote mode
       },
     });
 
     // Rest of initialization...
+  }
+
+  private async initializeRemoteConnection(url: string): Promise<ReturnType<typeof acp.ndJsonStream>> {
+    this.ws = new WebSocket(url);
+
+    await new Promise<void>((resolve, reject) => {
+      this.ws!.onopen = () => resolve();
+      this.ws!.onerror = (e) => reject(new Error('WebSocket connection failed'));
+    });
+
+    const input = new WritableStream<Uint8Array>({
+      write: (chunk) => { this.ws!.send(chunk); }
+    });
+
+    const output = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        this.ws!.onmessage = (event) => {
+          controller.enqueue(new Uint8Array(event.data));
+        };
+        this.ws!.onclose = () => controller.close();
+      }
+    });
+
+    return acp.ndJsonStream(input, output);
+  }
+
+  private async initializeLocalProcess(config: AgentConfig): Promise<ReturnType<typeof acp.ndJsonStream>> {
+    // Existing spawn logic...
   }
 }
 ```
@@ -165,41 +201,67 @@ interface AgentClientPluginSettings {
   // Existing settings...
 
   // New remote agent settings
-  remoteAgentEnabled: boolean;
-  remoteAgentUrl: string;
-  remoteAgentAuthToken?: string;
+  remoteAgent: {
+    enabled: boolean;
+    url: string;           // WebSocket URL (wss://...)
+    authToken?: string;    // Optional auth token
+  };
 }
 ```
 
-#### 4. Platform-Aware Adapter Selection
+#### 4. Platform Detection & Mode Selection
 
 ```typescript
-// In ChatView or plugin initialization
-const adapter = Platform.isDesktopApp
-  ? new AcpAdapter(plugin)
-  : new WebSocketAcpAdapter(plugin);
+// In ChatView or useAgentSession
+const shouldUseRemote = !Platform.isDesktopApp || settings.remoteAgent.enabled;
+
+const config: AgentConfig = {
+  ...baseConfig,
+  remoteUrl: shouldUseRemote ? settings.remoteAgent.url : undefined,
+};
+```
+
+#### 5. Update Platform Checks
+
+Remove or modify platform checks to allow mobile when remote is configured:
+
+```typescript
+// ChatView.tsx - Update platform check
+if (!Platform.isDesktopApp && !settings.remoteAgent.enabled) {
+  // Show "Configure remote agent" UI instead of throwing error
+}
+
+// terminal-manager.ts - Already gated by terminal capability
+// No changes needed - won't be called when terminal: false
 ```
 
 ### Phased Implementation
 
-#### Phase 1: Plugin Infrastructure
-- [ ] Create `WebSocketAcpAdapter` class implementing `IAgentClient`
-- [ ] Update settings to support remote agent configuration
-- [ ] Add platform detection for adapter selection
+#### Phase 1: AcpAdapter Remote Support
+- [ ] Add `initializeRemoteConnection()` method to AcpAdapter
+- [ ] Add mode detection based on `config.remoteUrl`
+- [ ] Set `terminal: false` in capabilities when in remote mode
+- [ ] Handle WebSocket lifecycle (connect, disconnect, reconnect)
 
-#### Phase 2: Remote Server ✅ (Complete)
+#### Phase 2: Settings & UI
+- [ ] Add remote agent settings to `AgentClientPluginSettings`
+- [ ] Add settings UI for remote connection configuration
+- [ ] Update platform checks in ChatView to allow mobile with remote config
+- [ ] Add connection status indicator
+
+#### Phase 3: Remote Server ✅ (Complete)
 - [x] Create standalone Node.js WebSocket server
 - [x] Implement agent process management
 - [x] Proxy ACP protocol messages
 - [x] Add authentication/security
 
-> **Note:** Terminal operations are NOT proxied through the remote server. Instead, the mobile client declares `terminal: false` in its client capabilities during ACP initialization. The agent will adapt its behavior accordingly (e.g., not attempting to run shell commands). This is the proper ACP approach - capability negotiation, not remote execution.
-
-#### Phase 3: Integration & Polish
-- [ ] Connection status UI
-- [ ] Reconnection handling
-- [ ] Error messages and troubleshooting
+#### Phase 4: Polish & Documentation
+- [ ] Reconnection handling with backoff
+- [ ] Error messages and troubleshooting UI
 - [ ] Documentation for self-hosting the remote server
+- [ ] Mobile-specific UX improvements
+
+> **Note:** Terminal operations are NOT proxied through the remote server. Instead, the client declares `terminal: false` in its capabilities during ACP initialization. The agent will adapt its behavior accordingly (e.g., providing instructions instead of executing). This is the proper ACP approach - capability negotiation, not remote execution.
 
 ## Terminal Operations on Mobile
 
@@ -284,14 +346,15 @@ Mobile support is **technically feasible** through WebSocket transport, and the 
 
 | Component | Complexity | Status |
 |-----------|------------|--------|
-| WebSocketAcpAdapter | Medium | To do - new adapter implementation |
+| AcpAdapter remote mode | Medium | To do - add WebSocket transport to existing adapter |
 | Remote Server | High | ✅ Complete - already developed |
 | Settings UI | Low | To do - add remote connection options |
+| Platform checks | Low | To do - update ChatView to allow mobile |
 | Testing | Medium | To do - desktop + mobile scenarios |
 
 ### Recommendations
 
-1. **Implement WebSocketAcpAdapter** - Create the plugin-side adapter to connect to the existing remote server
+1. **Extend AcpAdapter** - Add remote mode to existing adapter rather than creating a new class
 2. **Document self-hosting** - Clear instructions for users to run the remote server
 3. **Maintain desktop-first** - Keep local process support as the default for desktop users
-4. **Graceful fallback** - Show helpful message on mobile if remote server is not configured
+4. **Graceful fallback** - Show "Configure remote agent" UI on mobile if not configured
