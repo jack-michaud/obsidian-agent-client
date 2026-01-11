@@ -107,8 +107,8 @@ function ChatComponent({
 		if (Platform.isDesktopApp) {
 			return process.cwd();
 		}
-		// Mobile fallback - use empty string (should not reach here with proper vault adapter)
-		return "";
+		// Mobile
+		return plugin.app.vault.getRoot().path;
 	}, [plugin]);
 
 	const noteMentionService = useMemo(
