@@ -212,13 +212,15 @@ function buildAgentConfigWithApiKey(
 	const shouldUseRemote =
 		!Platform.isDesktopApp ||
 		(settings.remoteAgent.enabled &&
-			settings.remoteAgent.url.trim().length > 0);
+			settings.remoteAgent.controllerUrl.trim().length > 0);
 
-	// Add remote URL if remote mode is active
+	// Add remote Controller API settings if remote mode is active
 	const remoteConfig = shouldUseRemote
 		? {
-				remoteUrl: settings.remoteAgent.url,
-				remoteAuthToken: settings.remoteAgent.authToken,
+				remoteControllerUrl: settings.remoteAgent.controllerUrl,
+				remoteControllerAuthToken:
+					settings.remoteAgent.controllerAuthToken,
+				remoteClaudeCodeToken: settings.remoteAgent.claudeCodeToken,
 			}
 		: {};
 

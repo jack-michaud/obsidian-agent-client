@@ -57,17 +57,24 @@ export interface AgentConfig {
 	workingDirectory: string;
 
 	/**
-	 * WebSocket URL for remote agent connection.
-	 * If provided, the adapter will connect via WebSocket instead of spawning a local process.
+	 * Controller API URL for remote agent connection.
+	 * If provided, the adapter will call this API to create a sandbox,
+	 * then connect via WebSocket to the returned tunnel_url.
 	 * Used for mobile support where local process spawning is not available.
 	 */
-	remoteUrl?: string;
+	remoteControllerUrl?: string;
 
 	/**
-	 * Authentication token for remote agent connection.
-	 * Sent as part of the WebSocket handshake or initial message.
+	 * Bearer token for authenticating with the Controller API.
+	 * Sent in the Authorization header when creating sandboxes.
 	 */
-	remoteAuthToken?: string;
+	remoteControllerAuthToken?: string;
+
+	/**
+	 * Claude Code token for WebSocket connection.
+	 * Appended as ?token= query parameter to the sandbox WebSocket URL.
+	 */
+	remoteClaudeCodeToken?: string;
 }
 
 /**

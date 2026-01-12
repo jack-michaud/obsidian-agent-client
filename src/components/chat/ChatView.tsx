@@ -79,7 +79,7 @@ function ChatComponent({
 	// Platform & Remote Mode Check
 	// ============================================================
 	const remoteAgentSettings = plugin.settings.remoteAgent;
-	const isRemoteEnabled = remoteAgentSettings.enabled && remoteAgentSettings.url.trim().length > 0;
+	const isRemoteEnabled = remoteAgentSettings.enabled && remoteAgentSettings.controllerUrl.trim().length > 0;
 
 	// On mobile, require remote agent to be configured
 	if (!Platform.isDesktopApp && !isRemoteEnabled) {

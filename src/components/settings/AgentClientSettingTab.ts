@@ -480,31 +480,52 @@ export class AgentClientSettingTab extends PluginSettingTab {
 			!Platform.isDesktopApp
 		) {
 			new Setting(containerEl)
-				.setName("Server URL")
+				.setName("Controller API URL")
 				.setDesc(
-					"WebSocket URL of the remote agent server (e.g., ws://localhost:8080 or wss://your-server.com)",
+					"Base URL of the ACP Controller API (e.g., https://your-app.modal.run). A sandbox will be created via POST /api/sandbox/create.",
 				)
 				.addText((text) =>
 					text
-						.setPlaceholder("ws://localhost:8080")
-						.setValue(this.plugin.settings.remoteAgent.url)
+						.setPlaceholder("https://your-controller.modal.run")
+						.setValue(this.plugin.settings.remoteAgent.controllerUrl)
 						.onChange(async (value) => {
-							this.plugin.settings.remoteAgent.url = value.trim();
+							this.plugin.settings.remoteAgent.controllerUrl =
+								value.trim();
 							await this.plugin.saveSettings();
 						}),
 				);
 
 			new Setting(containerEl)
-				.setName("Auth token")
+				.setName("Controller auth token")
 				.setDesc(
-					"Optional authentication token for the remote server. (Stored as plain text)",
+					"Bearer token for authenticating with the Controller API. (Stored as plain text)",
 				)
 				.addText((text) => {
-					text.setPlaceholder("Optional auth token")
-						.setValue(this.plugin.settings.remoteAgent.authToken || "")
+					text.setPlaceholder("Controller bearer token")
+						.setValue(
+							this.plugin.settings.remoteAgent.controllerAuthToken,
+						)
 						.onChange(async (value) => {
-							this.plugin.settings.remoteAgent.authToken =
-								value.trim() || undefined;
+							this.plugin.settings.remoteAgent.controllerAuthToken =
+								value.trim();
+							await this.plugin.saveSettings();
+						});
+					text.inputEl.type = "password";
+				});
+
+			new Setting(containerEl)
+				.setName("Claude Code token")
+				.setDesc(
+					"OAuth token for Claude Code authentication. Appended to the sandbox WebSocket URL. (Stored as plain text)",
+				)
+				.addText((text) => {
+					text.setPlaceholder("sk-ant-oat01-...")
+						.setValue(
+							this.plugin.settings.remoteAgent.claudeCodeToken,
+						)
+						.onChange(async (value) => {
+							this.plugin.settings.remoteAgent.claudeCodeToken =
+								value.trim();
 							await this.plugin.saveSettings();
 						});
 					text.inputEl.type = "password";

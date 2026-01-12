@@ -1,6 +1,6 @@
 import { spawn, ChildProcess } from "child_process";
 import * as acp from "@agentclientprotocol/sdk";
-import { Platform, TFile } from "obsidian";
+import { Platform, TFile, requestUrl } from "obsidian";
 import { toRelativePath } from "../../shared/path-utils";
 
 import type {
@@ -68,6 +68,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	private agentProcess: ChildProcess | null = null; // Only used in local mode
 	private ws: WebSocket | null = null; // Only used in remote mode
 	private isRemoteMode = false;
+	private currentSandboxId: string | null = null; // Only used in remote mode
 	private logger: Logger;
 
 	// Session update callback (unified callback for all session updates)
@@ -150,7 +151,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		this.autoAllowPermissions = this.plugin.settings.autoAllowPermissions;
 
 		// Determine mode based on config
-		this.isRemoteMode = !!config.remoteUrl;
+		this.isRemoteMode = !!config.remoteControllerUrl;
 		this.logger.log(
 			`[AcpAdapter] Mode: ${this.isRemoteMode ? "remote" : "local"}`,
 		);
@@ -158,10 +159,11 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		let stream: ReturnType<typeof acp.ndJsonStream>;
 
 		if (this.isRemoteMode) {
-			// Remote mode: connect via WebSocket
+			// Remote mode: create sandbox via Controller API, then connect via WebSocket
 			stream = await this.initializeRemoteConnection(
-				config.remoteUrl!,
-				config.remoteAuthToken,
+				config.remoteControllerUrl!,
+				config.remoteControllerAuthToken,
+				config.remoteClaudeCodeToken,
 			);
 		} else {
 			// Local mode: spawn process (existing logic)
@@ -254,19 +256,124 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	}
 
 	/**
-	 * Initialize a remote WebSocket connection to an agent server.
+	 * Create a sandbox via the Controller API.
+	 */
+	private async createSandbox(
+		controllerUrl: string,
+		controllerAuthToken?: string,
+	): Promise<{ sandboxId: string; tunnelUrl: string }> {
+		this.logger.log(
+			`[AcpAdapter] Creating sandbox via Controller API: ${controllerUrl}`,
+		);
+
+		const response = await requestUrl({
+			url: `${controllerUrl}/api/sandbox/create`,
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				...(controllerAuthToken && {
+					Authorization: `Bearer ${controllerAuthToken}`,
+				}),
+			},
+			body: JSON.stringify({ timeout_seconds: 3600 }),
+		});
+
+		if (response.status === 401) {
+			throw new Error("Controller API authentication failed");
+		}
+
+		if (response.status !== 200) {
+			throw new Error(
+				`Failed to create sandbox: HTTP ${response.status}`,
+			);
+		}
+
+		const data = response.json as {
+			sandbox_id: string;
+			tunnel_url: string;
+			status: string;
+		};
+		this.logger.log(
+			`[AcpAdapter] Sandbox created: ${data.sandbox_id}, tunnel: ${data.tunnel_url}`,
+		);
+
+		// Save to plugin settings for persistence
+		this.plugin.settings.remoteAgent._currentSandboxId = data.sandbox_id;
+		this.plugin.settings.remoteAgent._currentWebsocketUrl = data.tunnel_url;
+		await this.plugin.saveSettings();
+
+		return {
+			sandboxId: data.sandbox_id,
+			tunnelUrl: data.tunnel_url,
+		};
+	}
+
+	/**
+	 * Terminate a sandbox via the Controller API.
+	 */
+	private async terminateSandbox(
+		controllerUrl: string,
+		controllerAuthToken: string | undefined,
+		sandboxId: string,
+	): Promise<void> {
+		this.logger.log(`[AcpAdapter] Terminating sandbox: ${sandboxId}`);
+
+		try {
+			const response = await requestUrl({
+				url: `${controllerUrl}/api/sandbox/${sandboxId}`,
+				method: "DELETE",
+				headers: {
+					...(controllerAuthToken && {
+						Authorization: `Bearer ${controllerAuthToken}`,
+					}),
+				},
+			});
+
+			if (response.status !== 200) {
+				this.logger.warn(
+					`[AcpAdapter] Failed to terminate sandbox: HTTP ${response.status}`,
+				);
+			} else {
+				this.logger.log(
+					`[AcpAdapter] Sandbox terminated: ${sandboxId}`,
+				);
+			}
+		} catch (error) {
+			this.logger.warn(
+				`[AcpAdapter] Error terminating sandbox: ${error}`,
+			);
+		}
+
+		// Clear from plugin settings
+		this.plugin.settings.remoteAgent._currentSandboxId = undefined;
+		this.plugin.settings.remoteAgent._currentWebsocketUrl = undefined;
+		await this.plugin.saveSettings();
+	}
+
+	/**
+	 * Initialize a remote WebSocket connection via Controller API.
+	 * Creates a sandbox first, then connects to the returned tunnel URL.
 	 */
 	private async initializeRemoteConnection(
-		url: string,
-		authToken?: string,
+		controllerUrl: string,
+		controllerAuthToken?: string,
+		claudeCodeToken?: string,
 	): Promise<ReturnType<typeof acp.ndJsonStream>> {
-		this.logger.log(`[AcpAdapter] Connecting to remote agent at: ${url}`);
+		// Step 1: Create sandbox via Controller API
+		const { sandboxId, tunnelUrl } = await this.createSandbox(
+			controllerUrl,
+			controllerAuthToken,
+		);
+		this.currentSandboxId = sandboxId;
 
-		// Create WebSocket connection
-		// If auth token is provided, append it as a query parameter
-		const wsUrl = authToken
-			? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(authToken)}`
-			: url;
+		this.logger.log(
+			`[AcpAdapter] Connecting to sandbox WebSocket: ${tunnelUrl}`,
+		);
+
+		// Step 2: Connect to the sandbox WebSocket with Claude Code token
+		const wsUrl = claudeCodeToken
+			? `${tunnelUrl}${tunnelUrl.includes("?") ? "&" : "?"}token=${encodeURIComponent(claudeCodeToken)}`
+			: tunnelUrl;
 
 		this.ws = new WebSocket(wsUrl);
 
@@ -819,7 +926,7 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 	/**
 	 * Disconnect from the agent and clean up resources.
 	 */
-	disconnect(): Promise<void> {
+	async disconnect(): Promise<void> {
 		this.logger.log("[AcpAdapter] Disconnecting...");
 
 		// Cancel all pending operations
@@ -834,11 +941,21 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 			this.agentProcess = null;
 		}
 
-		// Close WebSocket (remote mode)
+		// Close WebSocket and terminate sandbox (remote mode)
 		if (this.ws) {
 			this.logger.log("[AcpAdapter] Closing WebSocket");
 			this.ws.close();
 			this.ws = null;
+		}
+
+		// Terminate the sandbox if we have one
+		if (this.currentSandboxId && this.currentConfig?.remoteControllerUrl) {
+			await this.terminateSandbox(
+				this.currentConfig.remoteControllerUrl,
+				this.currentConfig.remoteControllerAuthToken,
+				this.currentSandboxId,
+			);
+			this.currentSandboxId = null;
 		}
 
 		// Clear connection and config references
@@ -851,7 +968,6 @@ export class AcpAdapter implements IAgentClient, IAcpClient {
 		this.isRemoteMode = false;
 
 		this.logger.log("[AcpAdapter] Disconnected");
-		return Promise.resolve();
 	}
 
 	/**

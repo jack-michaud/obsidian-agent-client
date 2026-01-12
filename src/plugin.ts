@@ -59,8 +59,12 @@ export interface AgentClientPluginSettings {
 	// Remote agent settings (for mobile support)
 	remoteAgent: {
 		enabled: boolean;
-		url: string;
-		authToken?: string;
+		controllerUrl: string;
+		controllerAuthToken: string;
+		claudeCodeToken: string;
+		// Hidden settings (not shown in UI, managed by adapter)
+		_currentWebsocketUrl?: string;
+		_currentSandboxId?: string;
 	};
 }
 
@@ -110,8 +114,11 @@ const DEFAULT_SETTINGS: AgentClientPluginSettings = {
 	sendMessageShortcut: "enter",
 	remoteAgent: {
 		enabled: false,
-		url: "",
-		authToken: undefined,
+		controllerUrl: "",
+		controllerAuthToken: "",
+		claudeCodeToken: "",
+		_currentWebsocketUrl: undefined,
+		_currentSandboxId: undefined,
 	},
 };
 
@@ -536,14 +543,26 @@ export default class AgentClientPlugin extends Plugin {
 							typeof rawRemote.enabled === "boolean"
 								? rawRemote.enabled
 								: DEFAULT_SETTINGS.remoteAgent.enabled,
-						url:
-							typeof rawRemote.url === "string"
-								? rawRemote.url
-								: DEFAULT_SETTINGS.remoteAgent.url,
-						authToken:
-							typeof rawRemote.authToken === "string"
-								? rawRemote.authToken
-								: DEFAULT_SETTINGS.remoteAgent.authToken,
+						controllerUrl:
+							typeof rawRemote.controllerUrl === "string"
+								? rawRemote.controllerUrl
+								: DEFAULT_SETTINGS.remoteAgent.controllerUrl,
+						controllerAuthToken:
+							typeof rawRemote.controllerAuthToken === "string"
+								? rawRemote.controllerAuthToken
+								: DEFAULT_SETTINGS.remoteAgent.controllerAuthToken,
+						claudeCodeToken:
+							typeof rawRemote.claudeCodeToken === "string"
+								? rawRemote.claudeCodeToken
+								: DEFAULT_SETTINGS.remoteAgent.claudeCodeToken,
+						_currentWebsocketUrl:
+							typeof rawRemote._currentWebsocketUrl === "string"
+								? rawRemote._currentWebsocketUrl
+								: DEFAULT_SETTINGS.remoteAgent._currentWebsocketUrl,
+						_currentSandboxId:
+							typeof rawRemote._currentSandboxId === "string"
+								? rawRemote._currentSandboxId
+								: DEFAULT_SETTINGS.remoteAgent._currentSandboxId,
 					};
 				}
 				return DEFAULT_SETTINGS.remoteAgent;
